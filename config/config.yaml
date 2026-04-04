@@ -1,0 +1,49 @@
+telegram:
+  bot_token: "${TELEGRAM_BOT_TOKEN}"
+  allowed_chat_id: "${ALLOWED_CHAT_ID}"
+
+llm:
+  provider: "openai_compatible"
+  api_key: "${LLM_API_KEY}"
+  base_url: "${LLM_BASE_URL}"
+  model: "${LLM_MODEL}"
+  max_tokens: 1024
+  temperature: 0.7
+  top_p: 1.0
+  seed: 42
+  stream: false
+  timeout: null
+  max_retries: 3
+  retry_delay: 2
+  enable_thinking: true
+  clear_thinking: false
+
+database:
+  path: "${DATABASE_PATH}"
+  timezone: "Asia/Kolkata"
+
+analytics:
+  default_currency: "INR"
+  chart_style: "professional"
+  max_report_entries: 10000
+
+reminders:
+  enabled: true
+  default_reminder_days: 7
+  check_interval: "0 9 * * *"
+
+security:
+  rate_limit_per_minute: 30
+  max_message_length: 4000
+  log_level: "INFO"
+  audit_log_enabled: true
+
+bot:
+  notify_on_restart: true
+  typing_indicator_enabled: true
+  confirmation_required: true
+  error_notification: "immediate"
+
+data_retention:
+  keep_all_data: true
+  backup_strategy: "manual"
