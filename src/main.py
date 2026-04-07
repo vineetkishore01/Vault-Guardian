@@ -1,6 +1,7 @@
 """Main entry point for Vault Guardian."""
 import asyncio
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -8,6 +9,33 @@ from src.config import config
 from src.database import db_manager
 from src.bot import run_bot
 from src.scheduler import reminder_scheduler
+
+# ── Duplicate instance guard ──
+PID_FILE = Path(".vault_guardian.pid")
+
+def _check_duplicate():
+    """Kill any existing bot instance, or fail if PID file is stale."""
+    if PID_FILE.exists():
+        try:
+            old_pid = int(PID_FILE.read_text().strip())
+            os.kill(old_pid, 0)  # Check if process exists
+            logger.info(f"Another instance running (PID {old_pid}), killing it...")
+            os.kill(old_pid, 9)  # SIGKILL — instant death
+            import time
+            time.sleep(3)  # Let Telegram release the polling lock
+        except (ProcessLookupError, ValueError):
+            pass  # Stale PID file, safe to remove
+        except PermissionError:
+            logger.warning(f"Cannot kill existing instance (PID {old_pid}), starting anyway")
+        except Exception:
+            pass
+        PID_FILE.unlink(missing_ok=True)
+
+    PID_FILE.write_text(str(os.getpid()))
+
+def _cleanup_pid():
+    PID_FILE.unlink(missing_ok=True)
+# ──────────────────────────────
 
 # Log to both file and stdout with immediate flushing
 log_file = Path("logs/bot.log")
@@ -81,6 +109,8 @@ async def send_startup_notification():
 
 async def main():
     """Main entry point."""
+    _check_duplicate()
+
     logger.info("=" * 50)
     logger.info("Starting Vault Guardian")
     logger.info("=" * 50)
@@ -89,7 +119,7 @@ async def main():
     
     logger.info("Initializing database...")
     try:
-        with db_manager.get_session() as db:
+        async with db_manager.get_session():
             logger.info("Database initialized successfully")
     except Exception as e:
         logger.error(f"Failed to initialize database: {e}")
@@ -113,6 +143,7 @@ async def main():
         logger.info("Shutting down...")
         reminder_scheduler.shutdown()
         db_manager.close()
+        _cleanup_pid()
         logger.info("Shutdown complete")
 
 

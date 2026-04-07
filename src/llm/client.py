@@ -118,15 +118,15 @@ class LLMClient:
                 from ..database import db_manager
                 from ..database.models import APIRateLimitLog
 
-                with db_manager.get_session() as db:
+                async with db_manager.get_session() as db:
                     rate_log = APIRateLimitLog(
                         endpoint="chat/completions",
                         response_time_ms=response_time_ms,
                         status_code=200,
-                        retry_count=0  # Tenacity handles retries transparently
+                        retry_count=0
                     )
                     db.add(rate_log)
-                    db.commit()
+                    await db.flush()
             except Exception:
                 pass  # Don't fail if logging fails
             

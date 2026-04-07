@@ -1,5 +1,6 @@
 """Tool definitions for LLM tool calling."""
 import json
+import logging
 from pydantic import BaseModel, Field, field_validator, ValidationError
 from typing import Dict, Any, List, Optional
 from datetime import date
@@ -11,15 +12,17 @@ from ..utils import (
     format_date, get_ist_today, get_date_range
 )
 
+logger = logging.getLogger(__name__)
+
 
 class EarningSchema(BaseModel):
     """Schema for adding an earning."""
-    brand_name: str = Field(default="--UNKNOWN Brand--")
-    amount: float = Field(..., gt=0)
+    brand_name: str = Field(default="--UNKNOWN Brand--", max_length=255)
+    amount: float = Field(..., ge=0, le=1000000000) # Min 0 (barter), Max 100 Crore
     payment_type: str = Field(default="cash")
     deliverables: Dict[str, int] = Field(default_factory=lambda: {"reels": 0, "stories": 0, "posts": 0})
     date: Optional[str] = None
-    notes: Optional[str] = None
+    notes: Optional[str] = Field(None, max_length=1000)
     confirm_brand: bool = False
 
     @field_validator("payment_type")
@@ -33,8 +36,8 @@ class EarningSchema(BaseModel):
 class ExpenseSchema(BaseModel):
     """Schema for adding an expense."""
     category: str
-    amount: float = Field(..., gt=0)
-    description: Optional[str] = None
+    amount: float = Field(..., gt=0, le=1000000000)
+    description: Optional[str] = Field(None, max_length=1000)
     date: Optional[str] = None
 
     @field_validator("category")
@@ -56,30 +59,34 @@ class ToolExecutor:
     async def add_earning(self, **kwargs) -> Dict[str, Any]:
         """Add a new earning entry."""
         try:
+            # Defense-in-depth: strip security-sensitive fields
+            kwargs.pop("confirm", None)
+            kwargs.pop("confirm_brand", None)
+
             # Pydantic validation
             data = EarningSchema(**kwargs)
-            
+
             entry_date = parse_date_string(data.date) if data.date else get_ist_today()
             if not entry_date:
                 entry_date = get_ist_today()
 
             payment_type_enum = PaymentType(data.payment_type)
-            
-            # Brand matching integration
+
+            # Brand matching integration — resolve canonical name FIRST
             from ..brand_matching import match_brand, get_or_create_brand_alias
-            
+
             brand_name = data.brand_name
             if not data.confirm_brand:
                 matches = await match_brand(brand_name, threshold=0.75, db_session=self.db)
                 if matches:
                     top_match = matches[0]
                     if top_match["confidence"] >= 0.9:
-                        # Auto-match
+                        # Auto-match to canonical name
                         canonical_name = top_match["brand_name"]
                         await get_or_create_brand_alias(canonical_name, brand_name, db_session=self.db)
                         brand_name = canonical_name
                     elif top_match["confidence"] >= 0.75:
-                        # Request confirmation
+                        # Request confirmation — dedup will run when user confirms
                         return {
                             "success": False,
                             "requires_confirmation": True,
@@ -87,10 +94,29 @@ class ToolExecutor:
                             "original_name": brand_name,
                             "suggested_name": top_match["brand_name"],
                             "confidence": top_match["confidence"],
-                            "data": kwargs, 
+                            "data": kwargs,
                             "message": f"Did you mean '{top_match['brand_name']}'? (Match confidence: {int(top_match['confidence']*100)}%)"
                         }
-            
+
+            # ── Dedup: check AFTER brand resolution, using resolved brand_name ──
+            from sqlalchemy import select, and_, func
+            from ..database.models import Earning
+            stmt = select(Earning).where(
+                and_(
+                    func.lower(Earning.brand_name) == func.lower(brand_name),
+                    Earning.amount_earned == data.amount,
+                    Earning.entry_date == entry_date
+                )
+            ).limit(1)
+            existing = await self.db.execute(stmt)
+            if existing.scalar_one_or_none():
+                return {
+                    "success": False,
+                    "error": "Duplicate",
+                    "message": f"This entry already exists: {format_currency(data.amount)} from {brand_name} on {format_date(entry_date)}."
+                }
+            # ───────────────────────────────────────────────────────────────────
+
             earning = await crud.EarningCRUD.create(
                 db=self.db,
                 brand_name=brand_name,
@@ -100,16 +126,18 @@ class ToolExecutor:
                 entry_date=entry_date,
                 notes=data.notes
             )
-            
+
             return {
                 "success": True,
                 "id": earning.id,
                 "message": f"Added earning: {format_currency(data.amount)} from {brand_name} on {format_date(entry_date)}"
             }
         except ValidationError as ve:
-            return {"success": False, "error": "Validation Error", "message": str(ve)}
+            logger.error(f"Validation error in add_earning: {ve}")
+            return {"success": False, "error": "Validation Error", "message": "Invalid input data. Please check the details and try again."}
         except Exception as e:
-            return {"success": False, "error": str(e), "message": f"Failed to add earning: {str(e)}"}
+            logger.error(f"Internal error in add_earning: {e}", exc_info=True)
+            return {"success": False, "error": "Processing Error", "message": "Something went wrong while adding the earning. Please try again."}
     
     async def update_earning(self, id: int, fields: Dict[str, Any]) -> Dict[str, Any]:
         """Update an existing earning entry."""
@@ -117,24 +145,42 @@ class ToolExecutor:
             earning = await crud.EarningCRUD.get_by_id(self.db, id)
             if not earning:
                 return {"success": False, "error": "Earning not found", "message": f"No earning found with ID {id}"}
-            
+
+            # Security: whitelist allowed fields to prevent LLM from setting internal attributes
+            # Map LLM-friendly field names to internal names
+            FIELD_MAP = {
+                "amount": "amount_earned",
+                "brand": "brand_name",
+                "date": "entry_date",
+                "type": "payment_type",
+            }
+            ALLOWED_FIELDS = {"brand_name", "amount_earned", "payment_type", "deliverables", "entry_date", "notes", "status",
+                              "brand", "amount", "date", "type"}  # include LLM-friendly aliases
             update_data = {}
             for key, value in fields.items():
-                if key == "payment_type":
+                if key not in ALLOWED_FIELDS:
+                    logger.warning(f"LLM attempted to set disallowed field: {key}")
+                    continue
+
+                # Map to internal field name
+                internal_key = FIELD_MAP.get(key, key)
+
+                if internal_key == "payment_type":
                     update_data["payment_type"] = PaymentType(value.lower())
-                elif key == "status":
+                elif internal_key == "status":
                     update_data["status"] = PaymentStatus(value.lower())
-                elif key == "date":
-                    entry_date = parse_date_string(value)
+                elif internal_key == "entry_date":
+                    entry_date = parse_date_string(value) if isinstance(value, str) else value
                     if entry_date:
                         update_data["entry_date"] = entry_date
                 else:
-                    update_data[key] = value
-            
+                    update_data[internal_key] = value
+
             updated = await crud.EarningCRUD.update(self.db, id, **update_data)
             return {"success": True, "id": updated.id, "message": f"Updated earning ID {id}"}
         except Exception as e:
-            return {"success": False, "error": str(e), "message": f"Failed to update earning: {str(e)}"}
+            logger.error(f"Internal error in update_earning: {e}", exc_info=True)
+            return {"success": False, "error": "Processing Error", "message": "Something went wrong while updating the earning. Please try again."}
     
     async def delete_earning(self, filter: Dict[str, Any], confirm: bool = False) -> Dict[str, Any]:
         """Delete earning entry/entries."""
@@ -184,14 +230,15 @@ class ToolExecutor:
             
             return {"success": True, "deleted_count": deleted_count, "message": f"Deleted {deleted_count} earning(s)"}
         except Exception as e:
-            return {"success": False, "error": str(e), "message": f"Failed to delete earnings: {str(e)}"}
+            logger.error(f"Internal error in delete_earning: {e}", exc_info=True)
+            return {"success": False, "error": "Processing Error", "message": "Something went wrong while deleting earnings. Please try again."}
     
     async def search_earnings(self, filters: Optional[Dict[str, Any]] = None, sort_by: str = "date", limit: Optional[int] = None) -> Dict[str, Any]:
         """Search earnings with filters."""
         try:
             filters = filters or {}
             start_date, end_date = None, None
-            
+
             if "period" in filters:
                 start_date, end_date = get_date_range(filters["period"])
             else:
@@ -199,16 +246,20 @@ class ToolExecutor:
                     start_date = parse_date_string(filters["start_date"])
                 if "end_date" in filters:
                     end_date = parse_date_string(filters["end_date"])
-            
+
             payment_type = PaymentType(filters["payment_type"].lower()) if "payment_type" in filters else None
             status = PaymentStatus(filters["status"].lower()) if "status" in filters else None
-            
-            earnings = await crud.EarningCRUD.search(self.db, brand_name=filters.get("brand_name"), start_date=start_date, end_date=end_date, payment_type=payment_type, status=status, limit=limit)
+
+            # Cap limit to prevent token overflow
+            safe_limit = min(limit, 100) if limit else 100
+
+            earnings = await crud.EarningCRUD.search(self.db, brand_name=filters.get("brand_name"), start_date=start_date, end_date=end_date, payment_type=payment_type, status=status, limit=safe_limit)
             results = [{"id": e.id, "brand": e.brand_name, "amount": e.amount_earned, "payment_type": e.payment_type.value, "deliverables": e.deliverables, "date": format_date(e.entry_date), "status": e.status.value, "notes": e.notes} for e in earnings]
             
             return {"success": True, "count": len(results), "results": results, "message": f"Found {len(results)} earning(s)"}
         except Exception as e:
-            return {"success": False, "error": str(e), "message": f"Failed to search earnings: {str(e)}"}
+            logger.error(f"Internal error in search_earnings: {e}", exc_info=True)
+            return {"success": False, "error": "Processing Error", "message": "Something went wrong while searching earnings. Please try again."}
     
     async def add_expense(self, **kwargs) -> Dict[str, Any]:
         """Add a new expense entry."""
@@ -216,13 +267,34 @@ class ToolExecutor:
             data = ExpenseSchema(**kwargs)
             expense_date = parse_date_string(data.date) if data.date else get_ist_today()
             category_enum = ExpenseCategory(data.category)
-            
+
+            # ── Dedup: prevent accidental doubles ──
+            from sqlalchemy import select, and_, func
+            from ..database.models import Expense
+            stmt = select(Expense).where(
+                and_(
+                    Expense.category == category_enum,
+                    Expense.amount == data.amount,
+                    Expense.expense_date == expense_date
+                )
+            ).limit(1)
+            existing = await self.db.execute(stmt)
+            if existing.scalar_one_or_none():
+                return {
+                    "success": False,
+                    "error": "Duplicate",
+                    "message": f"This expense already exists: {format_currency(data.amount)} for {data.category} on {format_date(expense_date)}."
+                }
+            # ──────────────────────────────────────────────
+
             expense = await crud.ExpenseCRUD.create(db=self.db, category=category_enum, amount=data.amount, description=data.description, expense_date=expense_date)
             return {"success": True, "id": expense.id, "message": f"Added expense: {format_currency(data.amount)} for {data.category} on {format_date(expense_date)}"}
         except ValidationError as ve:
-            return {"success": False, "error": "Validation Error", "message": str(ve)}
+            logger.error(f"Validation error in add_expense: {ve}")
+            return {"success": False, "error": "Validation Error", "message": "Invalid input data. Please check the details and try again."}
         except Exception as e:
-            return {"success": False, "error": str(e), "message": f"Failed to add expense: {str(e)}"}
+            logger.error(f"Internal error in add_expense: {e}", exc_info=True)
+            return {"success": False, "error": "Processing Error", "message": "Something went wrong while adding the expense. Please try again."}
     
     async def get_financial_summary(self, period: str = "this month", include_expenses: bool = True) -> Dict[str, Any]:
         """Get financial summary for period."""
@@ -247,7 +319,8 @@ class ToolExecutor:
                 "message": f"Financial summary for {period}: {format_currency(total_earnings)} earnings, {format_currency(total_expenses)} expenses"
             }
         except Exception as e:
-            return {"success": False, "error": str(e), "message": f"Failed to get financial summary: {str(e)}"}
+            logger.error(f"Internal error in get_financial_summary: {e}", exc_info=True)
+            return {"success": False, "error": "Processing Error", "message": "Something went wrong while generating the financial summary. Please try again."}
 
     async def generate_report(self, format: str, period: str, include_charts: bool = True) -> Dict[str, Any]:
         """Generate PDF or Excel report (wrapper for analytics)."""
@@ -256,7 +329,8 @@ class ToolExecutor:
             path = await generate_report(format=format, period=period, include_charts=include_charts, db_session=self.db)
             return {"success": True, "path": path, "message": f"Generated {format.upper()} report for {period}"}
         except Exception as e:
-            return {"success": False, "error": str(e), "message": f"Failed to generate report: {str(e)}"}
+            logger.error(f"Internal error in generate_report: {e}", exc_info=True)
+            return {"success": False, "error": "Processing Error", "message": "Something went wrong while generating the report. Please try again."}
 
     async def match_brand(self, name: str, threshold: float = 0.75) -> Dict[str, Any]:
         """Match brand name."""
@@ -265,22 +339,67 @@ class ToolExecutor:
             matches = await match_brand(brand_name=name, threshold=threshold, db_session=self.db)
             return {"success": True, "matches": matches, "message": f"Found {len(matches)} match(es)"}
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            logger.error(f"Internal error in match_brand: {e}", exc_info=True)
+            return {"success": False, "error": "Processing Error", "message": "Something went wrong while matching the brand. Please try again."}
 
-    async def set_reminder(self, earning_id: int, days: Optional[int] = None) -> Dict[str, Any]:
+    async def set_reminder(self, earning_id: int, days: Optional[int] = None, reminder_date: Optional[str] = None) -> Dict[str, Any]:
         """Set payment reminder."""
         try:
             earning = await crud.EarningCRUD.get_by_id(self.db, earning_id)
             if not earning:
                 return {"success": False, "message": "Earning not found"}
-            
+
+            # ── Check for existing PENDING reminder ──
+            from sqlalchemy import select, and_
+            from ..database.models import PaymentReminder, ReminderStatus
+            stmt = select(PaymentReminder).where(
+                and_(
+                    PaymentReminder.earning_id == earning_id,
+                    PaymentReminder.status == ReminderStatus.PENDING
+                )
+            ).limit(1)
+            existing = await self.db.execute(stmt)
+            existing_reminder = existing.scalar_one_or_none()
+            # ───────────────────────────────────────────
+
             from datetime import timedelta
-            reminder_days = days or 7
-            reminder_date = earning.entry_date + timedelta(days=reminder_days)
-            reminder = await crud.PaymentReminderCRUD.create(self.db, earning_id=earning_id, reminder_date=reminder_date, message=f"Reminder for {earning.brand_name}")
-            return {"success": True, "id": reminder.id, "reminder_date": format_date(reminder_date)}
+
+            # Support natural language dates: "tomorrow", "next week", "15th may"
+            if reminder_date:
+                parsed = parse_date_string(reminder_date)
+                if parsed:
+                    target_date = parsed
+                else:
+                    target_date = earning.entry_date + timedelta(days=days or 7)
+            else:
+                target_date = earning.entry_date + timedelta(days=days or 7)
+
+            if existing_reminder:
+                # Update existing reminder instead of creating a duplicate
+                existing_reminder.reminder_date = target_date
+                existing_reminder.message = f"Reminder for {earning.brand_name}"
+                await self.db.flush()
+                return {
+                    "success": True,
+                    "id": existing_reminder.id,
+                    "reminder_date": format_date(target_date),
+                    "message": f"Updated reminder for {earning.brand_name} to {format_date(target_date)}"
+                }
+
+            reminder = await crud.PaymentReminderCRUD.create(
+                self.db, earning_id=earning_id,
+                reminder_date=target_date,
+                message=f"Reminder for {earning.brand_name}"
+            )
+            return {
+                "success": True,
+                "id": reminder.id,
+                "reminder_date": format_date(target_date),
+                "message": f"Reminder set for {earning.brand_name} on {format_date(target_date)}"
+            }
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            logger.error(f"Internal error in set_reminder: {e}", exc_info=True)
+            return {"success": False, "error": "Processing Error", "message": "Something went wrong while setting the reminder. Please try again."}
 
 
 def get_tool_definitions() -> List[Dict[str, Any]]:
@@ -316,12 +435,24 @@ def get_tool_definitions() -> List[Dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": "update_earning",
-                "description": "Update an existing earning entry",
+                "description": "Update an existing earning entry. Use 'amount' for amount_earned, 'date' for entry_date, 'brand_name' for brand.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "id": {"type": "integer", "description": "Earning ID to update"},
-                        "fields": {"type": "object", "description": "Fields to update"}
+                        "fields": {
+                            "type": "object",
+                            "description": "Fields to update. Use keys: amount (number), brand_name (string), payment_type ('cash'/'barter'), deliverables (object), date (string), notes (string), status ('pending'/'received').",
+                            "properties": {
+                                "amount": {"type": "number", "description": "New amount earned"},
+                                "brand_name": {"type": "string", "description": "New brand name"},
+                                "payment_type": {"type": "string", "enum": ["cash", "barter"]},
+                                "deliverables": {"type": "object"},
+                                "date": {"type": "string", "description": "New date"},
+                                "notes": {"type": "string"},
+                                "status": {"type": "string", "enum": ["pending", "received"]}
+                            }
+                        }
                     },
                     "required": ["id", "fields"]
                 }
@@ -335,8 +466,7 @@ def get_tool_definitions() -> List[Dict[str, Any]]:
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "filter": {"type": "object", "description": "Filter criteria"},
-                        "confirm": {"type": "boolean", "description": "Confirm deletion"}
+                        "filter": {"type": "object", "description": "Filter criteria"}
                     },
                     "required": ["filter"]
                 }
@@ -423,12 +553,13 @@ def get_tool_definitions() -> List[Dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": "set_reminder",
-                "description": "Set payment reminder",
+                "description": "Set payment reminder for an earning. Use reminder_date for natural language dates like 'tomorrow', 'next week', '15th may'. Use days for number of days after earning date.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "earning_id": {"type": "integer", "description": "Earning ID"},
-                        "days": {"type": "integer", "description": "Days after earning date"}
+                        "earning_id": {"type": "integer", "description": "Earning ID to remind about"},
+                        "days": {"type": "integer", "description": "Days after the earning's date. Use if reminder_date is not suitable."},
+                        "reminder_date": {"type": "string", "description": "When to remind. Use natural language: 'tomorrow', 'next week', '15th may', 'end of month'. Preferred over days."}
                     },
                     "required": ["earning_id"]
                 }

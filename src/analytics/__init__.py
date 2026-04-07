@@ -7,6 +7,7 @@ import matplotlib
 from sqlalchemy.orm import Session
 
 from ..database import crud
+from ..database.models import Earning, Expense
 from ..utils import (
     format_currency, format_date, get_date_range,
     get_ist_today
@@ -26,14 +27,14 @@ async def generate_report(
         raise ValueError("Database session required")
     
     start_date, end_date = get_date_range(period)
-    
-    earnings = crud.EarningCRUD.get_by_date_range(
+
+    earnings = await crud.EarningCRUD.get_by_date_range(
         db=db_session,
         start_date=start_date,
         end_date=end_date
     )
-    
-    expenses = crud.ExpenseCRUD.get_by_date_range(
+
+    expenses = await crud.ExpenseCRUD.get_by_date_range(
         db=db_session,
         start_date=start_date,
         end_date=end_date

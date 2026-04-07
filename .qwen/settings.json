@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(source *)",
+      "Bash(pytest *)",
+      "Bash(pip install *)",
+      "Bash(python3 *)",
+      "Bash(ls *)",
+      "Bash(find *)",
+      "Bash(.venv/bin/python *)",
+      "Bash(file *)",
+      "Bash(.venv2/bin/pip *)",
+      "Bash(.venv2/bin/python *)",
+      "Bash(python *)",
+      "Bash(cat *)",
+      "Bash(rm *)",
+      "Bash(sleep *)",
+      "Bash(kill *)",
+      "Bash(tail *)",
+      "Bash(xargs *)",
+      "Bash(timeout *)",
+      "Bash(git add *)",
+      "Bash(git commit *)"
+    ]
+  },
+  "$version": 3
+}

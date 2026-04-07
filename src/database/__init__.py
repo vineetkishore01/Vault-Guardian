@@ -11,6 +11,9 @@ from typing import Generator, AsyncGenerator
 from .models import Base
 from ..config import config
 
+# Import CRUD module so it's accessible as `from ..database import crud`
+from . import crud
+
 
 class DatabaseManager:
     """Database manager for SQLite with full async and sync support."""

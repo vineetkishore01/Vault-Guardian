@@ -24,7 +24,8 @@ async def match_brand(
     from src.database.models import Earning
     
     stmt = select(Earning.brand_name).distinct()
-    brand_names = [row[0] for row in db_session.execute(stmt).all()]
+    result = await db_session.execute(stmt)
+    brand_names = [row[0] for row in result.all()]
     
     if not brand_names:
         return []
@@ -66,18 +67,17 @@ async def get_or_create_brand_alias(
     """Get existing brand alias or create new one."""
     if not db_session:
         return None
-    
-    existing = crud.BrandAliasCRUD.get_by_alias(db_session, alias)
-    
+
+    existing = await crud.BrandAliasCRUD.get_by_alias(db_session, alias)
+
     if existing:
         if confidence_score > existing.confidence_score:
             existing.confidence_score = confidence_score
             existing.is_confirmed = is_confirmed
-            db_session.commit()
-            db_session.refresh(existing)
+            await db_session.flush()
         return existing
-    
-    return crud.BrandAliasCRUD.create(
+
+    return await crud.BrandAliasCRUD.create(
         db=db_session,
         canonical_name=canonical_name,
         alias=alias,
@@ -94,24 +94,24 @@ async def confirm_brand_mapping(
     """Confirm a brand mapping."""
     if not db_session:
         return False
-    
-    brand_alias = crud.BrandAliasCRUD.get_by_alias(db_session, alias)
-    
+
+    brand_alias = await crud.BrandAliasCRUD.get_by_alias(db_session, alias)
+
     if brand_alias:
         brand_alias.canonical_name = canonical_name
         brand_alias.confidence_score = 1.0
         brand_alias.is_confirmed = True
-        db_session.commit()
+        await db_session.flush()
         return True
-    
-    crud.BrandAliasCRUD.create(
+
+    await crud.BrandAliasCRUD.create(
         db=db_session,
         canonical_name=canonical_name,
         alias=alias,
         confidence_score=1.0,
         is_confirmed=True
     )
-    
+
     return True
 
 
@@ -122,8 +122,8 @@ async def get_all_brand_aliases(
     """Get all aliases for a canonical brand name."""
     if not db_session:
         return []
-    
-    return crud.BrandAliasCRUD.get_all_aliases(db_session, canonical_name)
+
+    return await crud.BrandAliasCRUD.get_all_aliases(db_session, canonical_name)
 
 
 async def find_canonical_brand(
@@ -133,19 +133,19 @@ async def find_canonical_brand(
     """Find canonical brand name for a given brand name."""
     if not db_session:
         return None
-    
+
     normalized = normalize_brand_name(brand_name)
-    
-    brand_alias = crud.BrandAliasCRUD.get_by_alias(db_session, normalized)
-    
+
+    brand_alias = await crud.BrandAliasCRUD.get_by_alias(db_session, normalized)
+
     if brand_alias:
         return brand_alias.canonical_name
-    
+
     matches = await match_brand(brand_name, threshold=0.9, db_session=db_session)
-    
+
     if matches and matches[0]["confidence"] >= 0.9:
         return matches[0]["brand_name"]
-    
+
     return None
 
 
@@ -156,8 +156,8 @@ async def suggest_brand_name(
     """Suggest brand names based on partial match."""
     if not db_session:
         return []
-    
-    existing_brands = crud.EarningCRUD.search(
+
+    existing_brands = await crud.EarningCRUD.search(
         db=db_session,
         brand_name=partial_name,
         limit=10
