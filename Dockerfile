@@ -1,26 +1,14 @@
 # Stage 1: Build dependencies
-FROM python:3.14-alpine AS builder
+FROM python:3.13-slim AS builder
 
 WORKDIR /app
 
-# Install build dependencies
-RUN apk add --no-cache \
-    gcc \
-    g++ \
-    musl-dev \
-    python3-dev \
-    libffi-dev \
-    cargo \
-    pkgconfig \
-    freetype-dev \
-    libpng-dev
-
-# Copy and install Python dependencies
+# Copy and install Python dependencies first (better layer caching)
 COPY requirements.txt .
 RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 # Stage 2: Production runtime
-FROM python:3.14-alpine
+FROM python:3.13-slim
 
 LABEL org.opencontainers.image.source="https://github.com/vineetkishore01/Vault-Guardian"
 LABEL org.opencontainers.image.description="Vault Guardian - AI-powered Telegram bot for finance tracking"
@@ -28,12 +16,6 @@ LABEL org.opencontainers.image.version="1.0.0"
 LABEL org.opencontainers.image.licenses="MIT"
 
 WORKDIR /app
-
-# Install runtime dependencies (including matplotlib runtime deps)
-RUN apk add --no-cache \
-    libffi \
-    freetype \
-    libpng
 
 # Copy installed packages from builder
 COPY --from=builder /install /usr/local
