@@ -6,10 +6,14 @@ WORKDIR /app
 # Install build dependencies
 RUN apk add --no-cache \
     gcc \
+    g++ \
     musl-dev \
     python3-dev \
     libffi-dev \
-    cargo
+    cargo \
+    pkgconfig \
+    freetype-dev \
+    libpng-dev
 
 # Copy and install Python dependencies
 COPY requirements.txt .
@@ -24,8 +28,11 @@ LABEL org.opencontainers.image.licenses="MIT"
 
 WORKDIR /app
 
-# Install runtime dependencies only
-RUN apk add --no-cache libffi
+# Install runtime dependencies (including matplotlib runtime deps)
+RUN apk add --no-cache \
+    libffi \
+    freetype \
+    libpng
 
 # Copy installed packages from builder
 COPY --from=builder /install /usr/local
