@@ -25,8 +25,8 @@ COPY src/ ./src/
 COPY config/ ./config/
 
 # Create non-root user
-RUN addgroup -g 1000 -S appgroup && \
-    adduser -u 1000 -S appuser -G appgroup && \
+RUN groupadd -g 1000 appgroup && \
+    useradd -u 1000 -g appgroup -M -s /bin/false appuser && \
     chown -R appuser:appgroup /app
 
 # Create runtime directories
