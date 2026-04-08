@@ -1,5 +1,5 @@
 # Stage 1: Build dependencies
-FROM python:3.13-slim AS builder
+FROM python:3.13.3-slim-bookworm AS builder
 
 WORKDIR /app
 
@@ -8,7 +8,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 # Stage 2: Production runtime
-FROM python:3.13-slim
+FROM python:3.13.3-slim-bookworm
 
 LABEL org.opencontainers.image.source="https://github.com/vineetkishore01/Vault-Guardian"
 LABEL org.opencontainers.image.description="Vault Guardian - AI-powered Telegram bot for finance tracking"
