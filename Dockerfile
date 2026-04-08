@@ -24,6 +24,7 @@ FROM python:3.14-alpine
 
 LABEL org.opencontainers.image.source="https://github.com/vineetkishore01/Vault-Guardian"
 LABEL org.opencontainers.image.description="Vault Guardian - AI-powered Telegram bot for finance tracking"
+LABEL org.opencontainers.image.version="1.0.0"
 LABEL org.opencontainers.image.licenses="MIT"
 
 WORKDIR /app
