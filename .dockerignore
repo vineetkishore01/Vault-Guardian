@@ -1,0 +1,62 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Documentation (not needed in production)
+docs/
+README.md
+AGENTS.md
+
+# Testing
+tests/
+pytest.ini
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Development scripts
+check_setup.py
+reset_data.py
+backup_data.py
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment files (will be mounted or passed via env vars)
+.env
+.env.local
+.env.example
+
+# Data (runtime data, not build-time)
+data/
+logs/
+reports/
+backups/
+
+# Python cache
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+docker-compose.override.yml
+
+# Qwen
+.qwen/

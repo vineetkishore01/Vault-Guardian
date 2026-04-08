@@ -2,6 +2,28 @@
 
 An agentic AI Telegram bot for Instagram influencers to track earnings and expenses using natural language.
 
+## 🚀 Quick Start
+
+### Local Development
+```bash
+git clone https://github.com/vineetkishore01/Vault-Guardian.git
+cd Vault-Guardian
+pip install -r requirements-dev.txt
+cp .env.example .env  # edit with your credentials
+python -m src.main
+```
+
+### Docker Production
+```bash
+# Pull from GitHub Container Registry
+docker pull ghcr.io/vineetkishore01/vault-guardian:latest
+
+# Deploy with Docker Compose
+docker compose up -d
+```
+
+📚 **Full deployment guide:** [DOCKER_SETUP.md](DOCKER_SETUP.md) | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
+
 ## 🚀 Key Features
 
 - **Natural Language Processing** — Understands amounts like "50k", "1.5 lakh", "₹75000" and dates like "today", "yesterday", "2nd April"

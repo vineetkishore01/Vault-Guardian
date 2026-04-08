@@ -1,29 +1,74 @@
-# Stage 1: Builder
-FROM python:3.14-slim as builder
+# Stage 1: Build dependencies
+FROM python:3.14-alpine AS builder
 
 WORKDIR /app
 
+# Install build dependencies
+RUN apk add --no-cache \
+    gcc \
+    musl-dev \
+    python3-dev \
+    libffi-dev \
+    cargo
+
+# Copy and install Python dependencies
 COPY requirements.txt .
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
-RUN pip install --user --no-cache-dir -r requirements.txt
+# Stage 2: Production runtime
+FROM python:3.14-alpine
 
-# Stage 2: Runtime
-FROM python:3.14-slim
+LABEL org.opencontainers.image.source="https://github.com/vineetkishore01/Vault-Guardian"
+LABEL org.opencontainers.image.description="Vault Guardian - AI-powered Telegram bot for finance tracking"
+LABEL org.opencontainers.image.licenses="MIT"
 
 WORKDIR /app
 
-COPY --from=builder /root/.local /root/.local
+# Install runtime dependencies only
+RUN apk add --no-cache libffi
 
-COPY src/ /app/src/
-COPY config/ /app/config/
+# Copy installed packages from builder
+COPY --from=builder /install /usr/local
 
-ENV PATH=/root/.local/bin:$PATH
+# Copy application code
+COPY src/ ./src/
+COPY config/ ./config/
 
-RUN useradd -m -u 1000 appuser && \
-    chown -R appuser:appuser /app
+# Create non-root user
+RUN addgroup -g 1000 -S appgroup && \
+    adduser -u 1000 -S appuser -G appgroup && \
+    chown -R appuser:appgroup /app
 
+# Create runtime directories
+RUN mkdir -p /app/data /app/logs /app/reports && \
+    chown -R appuser:appgroup /app/data /app/logs /app/reports
+
+# Switch to non-root user
 USER appuser
 
+# Environment variables with defaults
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    DATABASE_PATH=/app/data/vault_guardian.db \
+    TELEGRAM_BOT_TOKEN="" \
+    ALLOWED_CHAT_ID="" \
+    LLM_API_KEY="" \
+    LLM_BASE_URL="https://integrate.api.nvidia.com/v1" \
+    LLM_MODEL="z-ai/glm4.7" \
+    LLM_TEMPERATURE="0.7" \
+    LLM_TOP_P="1.0" \
+    LLM_MAX_TOKENS="16384" \
+    LLM_STREAM="false" \
+    LLM_ENABLE_THINKING="false" \
+    LLM_CLEAR_THINKING="true" \
+    LLM_TIMEOUT="60" \
+    LLM_MAX_RETRIES="3" \
+    LLM_RETRY_DELAY="2" \
+    TIMEZONE="Asia/Kolkata"
+
 EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD python -c "import sys; sys.exit(0)" || exit 1
 
 CMD ["python", "-m", "src.main"]
