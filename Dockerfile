@@ -24,14 +24,17 @@ COPY --from=builder /install /usr/local
 COPY src/ ./src/
 COPY config/ ./config/
 
+# Copy entrypoint script (fixes volume permissions at runtime)
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
 # Create non-root user
 RUN groupadd -g 1000 appgroup && \
     useradd -u 1000 -g appgroup -M -s /bin/false appuser && \
     chown -R appuser:appgroup /app
 
-# Create runtime directories
-RUN mkdir -p /app/data /app/logs /app/reports && \
-    chown -R appuser:appgroup /app/data /app/logs /app/reports
+# Create runtime directories (will be overridden by volumes, fixed by entrypoint)
+RUN mkdir -p /app/data /app/logs /app/reports
 
 # Switch to non-root user
 USER appuser
@@ -61,4 +64,5 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python -c "import sys; sys.exit(0)" || exit 1
 
+ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["python", "-m", "src.main"]
