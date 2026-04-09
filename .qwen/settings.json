@@ -20,7 +20,17 @@
       "Bash(xargs *)",
       "Bash(timeout *)",
       "Bash(git add *)",
-      "Bash(git commit *)"
+      "Bash(git commit *)",
+      "Bash(git push *)",
+      "Bash(mkdir *)",
+      "Bash(chmod *)",
+      "Bash(curl *)",
+      "Bash(print)",
+      "Bash(\")/logs\")",
+      "Bash(\")\")",
+      "Bash(\")/jobs\")",
+      "Bash(docker build *)",
+      "Bash(docker *)"
     ]
   },
   "$version": 3

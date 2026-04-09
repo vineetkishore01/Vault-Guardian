@@ -19,7 +19,7 @@ from ..config import config
 from ..database import db_manager, crud
 from ..database.models import utcnow
 from ..llm import llm_client, get_tool_definitions
-from ..llm.tools import ToolExecutor
+from ..llm.tools import ToolExecutor, _truncate_tool_result
 from ..utils import (
     format_currency,
     format_date,
@@ -333,6 +333,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await _stop_typing()
                     await update.message.reply_text(log_response)
 
+                    # If a report was generated, send it as a document
+                    report_paths = [r.get("path") for r in all_results if r.get("success") and r.get("path")]
+                    for report_path in report_paths:
+                        try:
+                            from pathlib import Path
+                            rp = Path(report_path)
+                            if rp.exists():
+                                await update.message.reply_document(
+                                    document=open(rp, 'rb'),
+                                    caption=f"📊 Report: {rp.name}",
+                                    filename=rp.name
+                                )
+                                logger.info(f"📎 Report sent to user: {rp.name}")
+                        except Exception as e:
+                            logger.error(f"Failed to send report {report_path}: {e}")
+
                     # Save to history
                     _append_history(chat_id, "user", user_message)
                     _append_history(chat_id, "assistant", log_response)
@@ -400,14 +416,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 }
                 messages.append(assistant_msg)
 
-                # Append tool results in the format the LLM expects
+                # Append tool results in the format the LLM expects (truncated to prevent overflow)
                 for i, result in enumerate(batch_results):
                     tool_call_id = tool_calls[i].id if i < len(tool_calls) else ""
+                    truncated = _truncate_tool_result(result)
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call_id,
-                        "content": json.dumps(result, default=str)
+                        "content": json.dumps(truncated, default=str)
                     })
+
+                # If a tool raised an exception, feed the error back to the LLM so it can recover
+                if tool_error:
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_calls[-1].id if tool_calls else "",
+                        "content": json.dumps({
+                            "success": False,
+                            "error": tool_error["error"],
+                            "message": f"The {tool_error['tool']} operation failed: {tool_error['error']}. Tell the user what went wrong."
+                        })
+                    })
+                    # Reset tool_error so we don't also hit the error handler below
+                    # but let the LLM see the error and respond naturally
+                    break
 
                 # Loop back — LLM decides if more tools are needed
 
@@ -593,6 +625,36 @@ async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ Error: {res.get('message')}")
 
 
+async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /report command — generates PDF report for current month."""
+    chat_id = update.effective_chat.id
+    if not validate_chat_id(chat_id):
+        await update.message.reply_text("Unauthorized access.")
+        return
+
+    await update.message.chat.send_action("typing")
+    logger.info(f"📥 /report command (chat_id={chat_id})")
+
+    async with db_manager.get_session() as db:
+        executor = ToolExecutor(db)
+        result = await executor.generate_report(format="pdf", period="this month", include_charts=True)
+
+        if result.get("success") and result.get("path"):
+            from pathlib import Path
+            rp = Path(result["path"])
+            if rp.exists():
+                await update.message.reply_document(
+                    document=open(rp, 'rb'),
+                    caption=f"📊 Monthly Report — {rp.name}",
+                    filename=rp.name
+                )
+                logger.info(f"📎 Report sent via /report: {rp.name}")
+            else:
+                await update.message.reply_text(f"❌ Report file not found: {result['path']}")
+        else:
+            await update.message.reply_text(f"❌ Failed to generate report: {result.get('message', 'Unknown error')}")
+
+
 async def earnings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /earnings command."""
     async with db_manager.get_session() as db:
@@ -623,6 +685,7 @@ def create_application() -> Application:
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("summary", summary_command))
+    application.add_handler(CommandHandler("report", report_command))
     application.add_handler(CommandHandler("earnings", earnings_command))
     application.add_handler(CommandHandler("expenses", expenses_command))
     application.add_handler(CallbackQueryHandler(handle_callback_query))
