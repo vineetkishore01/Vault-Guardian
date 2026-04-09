@@ -212,13 +212,14 @@ def _build_summary_from_results(results: List[Dict[str, Any]]) -> str:
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle natural language messages (Async)."""
     chat_id = update.effective_chat.id
-    logger.info(f"handle_message called: chat_id={chat_id}, text={update.message.text[:50] if update.message.text else 'None'}")
+    user_message = update.message.text
+    logger.info(f"📥 User message (chat_id={chat_id}): {user_message[:100]}")
+
     if not validate_chat_id(chat_id):
-        logger.warning(f"Unauthorized chat_id: {chat_id} vs allowed: {config.telegram.allowed_chat_id}")
+        logger.warning(f"Unauthorized chat_id: {chat_id}")
         await update.message.reply_text("Unauthorized access.")
         return
 
-    user_message = update.message.text
     if not user_message or len(user_message) > config.security.max_message_length:
         await update.message.reply_text("Message too long or empty.")
         return
@@ -289,6 +290,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 tool_calls = llm_response.get("tool_calls")
                 content = llm_response.get("content")
 
+                # Log LLM response details
+                if tool_calls:
+                    tool_names = [tc.function.name for tc in tool_calls]
+                    logger.info(f"🤖 LLM called tools: {', '.join(tool_names)}")
+                elif content:
+                    content_preview = content[:150] + "..." if len(content) > 150 else content
+                    logger.info(f"🤖 LLM responded: {content_preview}")
+
                 if not tool_calls:
                     # No more tool calls — respond with LLM's text
                     log_llm_content = content
@@ -318,6 +327,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         log_response = _build_summary_from_results(all_results) or "✅ Done."
                     else:
                         log_response = "I'm not sure how to help. Could you rephrase?"
+
+                    logger.info(f"📤 Bot response: {log_response[:150]}{'...' if len(log_response) > 150 else ''}")
 
                     await _stop_typing()
                     await update.message.reply_text(log_response)
@@ -360,6 +371,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         result = await method(**arguments)
                         batch_results.append(result)
                         log_tool_results.append(result)
+
+                        # Log tool execution result
+                        if result.get("success"):
+                            logger.info(f"✅ Tool '{tool_name}': {result.get('message', 'OK')[:100]}")
+                        else:
+                            logger.warning(f"⚠️ Tool '{tool_name}' failed: {result.get('message', 'Unknown error')[:100]}")
 
                         if result.get("requires_confirmation"):
                             confirmation_result = result
@@ -480,6 +497,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _stop_typing()
         if "timeout" in str(e).lower() or "timed out" in str(e).lower():
             log_response = "⏳ The AI service took too long to respond. Please try again."
+            logger.warning("⏳ LLM timeout — responding with error message")
             await update.message.reply_text(log_response)
         else:
             log_response = "❌ Something went wrong. Please try rephrasing your request."

@@ -67,6 +67,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Suppress noisy HTTP client logs (Telegram polling + OpenAI SDK internals)
+# Actual LLM interactions are logged by the handler at a higher level
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("openai._base_client").setLevel(logging.WARNING)
+logging.getLogger("telegram.ext").setLevel(logging.WARNING)
+
 
 def setup_directories():
     """Create necessary directories."""
