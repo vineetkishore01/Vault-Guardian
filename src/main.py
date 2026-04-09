@@ -2,13 +2,12 @@
 import asyncio
 import logging
 import os
-import signal
 import sys
 from pathlib import Path
 
 from src.config import config
 from src.database import db_manager
-from src.bot import run_bot, create_application
+from src.bot import run_bot
 from src.scheduler import reminder_scheduler
 
 # ── Duplicate instance guard ──
@@ -140,41 +139,15 @@ async def main():
     await send_startup_notification()
 
     logger.info("Starting bot...")
-    # Create the application so we can wire up the scheduler
-    app = create_application()
-
-    # Wire up scheduler with bot instance
-    reminder_scheduler.set_bot(app.bot)
-    logger.info("Scheduler wired up with bot instance")
-
-    # Register signal handlers for graceful shutdown
-    loop = asyncio.get_event_loop()
-    stop_event = asyncio.Event()
-
-    def _signal_handler():
-        logger.info("Received shutdown signal, cleaning up...")
-        stop_event.set()
-
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, _signal_handler)
-
     try:
-        await app.initialize()
-        await app.start()
-        await app.updater.start_polling(drop_pending_updates=True)
-        # Wait until signal received
-        await stop_event.wait()
+        await run_bot()
+    except KeyboardInterrupt:
+        logger.info("Received interrupt signal")
     except Exception as e:
         logger.error(f"Fatal error: {e}", exc_info=True)
         sys.exit(1)
     finally:
         logger.info("Shutting down...")
-        try:
-            await app.updater.stop()
-            await app.stop()
-            await app.shutdown()
-        except Exception:
-            pass
         reminder_scheduler.shutdown()
         db_manager.close()
         _cleanup_pid()

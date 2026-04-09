@@ -19,7 +19,7 @@ from ..config import config
 from ..database import db_manager, crud
 from ..database.models import utcnow
 from ..llm import llm_client, get_tool_definitions
-from ..llm.tools import ToolExecutor, _truncate_tool_result
+from ..llm.tools import ToolExecutor
 from ..utils import (
     format_currency,
     format_date,
@@ -333,22 +333,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await _stop_typing()
                     await update.message.reply_text(log_response)
 
-                    # If a report was generated, send it as a document
-                    report_paths = [r.get("path") for r in all_results if r.get("success") and r.get("path")]
-                    for report_path in report_paths:
-                        try:
-                            from pathlib import Path
-                            rp = Path(report_path)
-                            if rp.exists():
-                                await update.message.reply_document(
-                                    document=open(rp, 'rb'),
-                                    caption=f"📊 Report: {rp.name}",
-                                    filename=rp.name
-                                )
-                                logger.info(f"📎 Report sent to user: {rp.name}")
-                        except Exception as e:
-                            logger.error(f"Failed to send report {report_path}: {e}")
-
                     # Save to history
                     _append_history(chat_id, "user", user_message)
                     _append_history(chat_id, "assistant", log_response)
@@ -416,30 +400,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 }
                 messages.append(assistant_msg)
 
-                # Append tool results in the format the LLM expects (truncated to prevent overflow)
+                # Append tool results in the format the LLM expects
                 for i, result in enumerate(batch_results):
                     tool_call_id = tool_calls[i].id if i < len(tool_calls) else ""
-                    truncated = _truncate_tool_result(result)
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call_id,
-                        "content": json.dumps(truncated, default=str)
+                        "content": json.dumps(result, default=str)
                     })
-
-                # If a tool raised an exception, feed the error back to the LLM so it can recover
-                if tool_error:
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_calls[-1].id if tool_calls else "",
-                        "content": json.dumps({
-                            "success": False,
-                            "error": tool_error["error"],
-                            "message": f"The {tool_error['tool']} operation failed: {tool_error['error']}. Tell the user what went wrong."
-                        })
-                    })
-                    # Reset tool_error so we don't also hit the error handler below
-                    # but let the LLM see the error and respond naturally
-                    break
 
                 # Loop back — LLM decides if more tools are needed
 

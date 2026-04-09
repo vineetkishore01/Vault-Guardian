@@ -14,22 +14,27 @@ from ..utils import (
 
 logger = logging.getLogger(__name__)
 
-# Whitelist of allowed deliverable keys
-ALLOWED_DELIVERABLE_KEYS = {"reels", "stories", "posts"}
 
-# Maximum chars for tool results fed back to LLM
-MAX_TOOL_RESULT_CHARS = 5000
+def _sanitize_amount(raw_amount) -> float:
+    """Server-side amount parsing safety net.
+    Handles strings like '50k', '1.5L', '50000' that the LLM might pass."""
+    if isinstance(raw_amount, (int, float)):
+        return float(raw_amount)
+    if isinstance(raw_amount, str):
+        parsed = parse_amount_string(raw_amount)
+        if parsed is not None:
+            return parsed
+    return None
 
 
 class EarningSchema(BaseModel):
     """Schema for adding an earning."""
     brand_name: str = Field(default="--UNKNOWN Brand--", max_length=255)
-    amount: float = Field(..., ge=0, le=1000000000)  # Min 0 (barter), Max 100 Crore
+    amount: float = Field(..., ge=0, le=1000000000)
     payment_type: str = Field(default="cash")
     deliverables: Dict[str, int] = Field(default_factory=lambda: {"reels": 0, "stories": 0, "posts": 0})
     date: Optional[str] = None
     notes: Optional[str] = Field(None, max_length=1000)
-    currency: Optional[str] = Field(default="INR", description="Currency code (default INR)")
 
     @field_validator("payment_type")
     @classmethod
@@ -55,49 +60,6 @@ class ExpenseSchema(BaseModel):
         return v.lower()
 
 
-def _sanitize_amount(raw_amount) -> float:
-    """Server-side amount parsing safety net.
-    Handles strings like '50k', '1.5L', '50000' that the LLM might pass."""
-    if isinstance(raw_amount, (int, float)):
-        return float(raw_amount)
-    if isinstance(raw_amount, str):
-        parsed = parse_amount_string(raw_amount)
-        if parsed is not None:
-            return parsed
-    # If we can't parse, return None so caller can handle
-    return None
-
-
-def _sanitize_deliverables(raw_deliverables: dict) -> dict:
-    """Filter deliverables to only allow known keys."""
-    if not raw_deliverables:
-        return {"reels": 0, "stories": 0, "posts": 0}
-    return {
-        k: v for k, v in raw_deliverables.items()
-        if k in ALLOWED_DELIVERABLE_KEYS
-    }
-
-
-def _truncate_tool_result(result: Dict[str, Any]) -> Dict[str, Any]:
-    """Truncate tool result strings to prevent LLM context overflow."""
-    json_str = json.dumps(result, default=str)
-    if len(json_str) > MAX_TOOL_RESULT_CHARS:
-        truncated = json_str[:MAX_TOOL_RESULT_CHARS]
-        # Try to end at a valid JSON boundary
-        last_comma = truncated.rfind(",")
-        last_brace = truncated.rfind("}")
-        cut_point = max(last_comma, last_brace)
-        if cut_point > 0:
-            truncated = truncated[:cut_point]
-        return {
-            "success": result.get("success", False),
-            "message": result.get("message", "")[:200],
-            "truncated": True,
-            "note": f"Result truncated to {MAX_TOOL_RESULT_CHARS} chars"
-        }
-    return result
-
-
 class ToolExecutor:
     """Execute tools called by LLM (Async)."""
 
@@ -108,7 +70,6 @@ class ToolExecutor:
     async def add_earning(self, **kwargs) -> Dict[str, Any]:
         """Add a new earning entry."""
         try:
-            # Defense-in-depth: strip security-sensitive fields
             kwargs.pop("confirm", None)
             kwargs.pop("confirm_brand", None)
 
@@ -119,27 +80,14 @@ class ToolExecutor:
                 if parsed_amount is not None:
                     kwargs["amount"] = parsed_amount
                     logger.info(f"Amount parsed: '{raw_amount}' -> {parsed_amount}")
-                else:
-                    logger.warning(f"Could not parse amount: '{raw_amount}', letting Pydantic handle it")
 
-            # Sanitize deliverables — only allow known keys
-            if "deliverables" in kwargs and isinstance(kwargs["deliverables"], dict):
-                filtered = _sanitize_deliverables(kwargs["deliverables"])
-                dropped_keys = set(kwargs["deliverables"].keys()) - ALLOWED_DELIVERABLE_KEYS
-                if dropped_keys:
-                    logger.warning(f"Dropped unknown deliverable keys: {dropped_keys}")
-                kwargs["deliverables"] = filtered
-
-            # Pydantic validation
             data = EarningSchema(**kwargs)
-
             entry_date = parse_date_string(data.date) if data.date else get_ist_today()
             if not entry_date:
                 entry_date = get_ist_today()
 
             payment_type_enum = PaymentType(data.payment_type)
 
-            # Brand matching integration — resolve canonical name FIRST
             from ..brand_matching import match_brand, get_or_create_brand_alias
 
             brand_name = data.brand_name
@@ -149,7 +97,6 @@ class ToolExecutor:
                 if matches:
                     top_match = matches[0]
                     if top_match["confidence"] >= 0.9:
-                        # Auto-match to canonical name
                         canonical_name = top_match["brand_name"]
                         alias_obj = await get_or_create_brand_alias(
                             canonical_name, brand_name, db_session=self.db
@@ -157,7 +104,6 @@ class ToolExecutor:
                         brand_name = canonical_name
                         canonical_brand_id = alias_obj.id
                     elif top_match["confidence"] >= 0.75:
-                        # Request confirmation — dedup will run when user confirms
                         return {
                             "success": False,
                             "requires_confirmation": True,
@@ -169,7 +115,6 @@ class ToolExecutor:
                             "message": f"Did you mean '{top_match['brand_name']}'? (Match confidence: {int(top_match['confidence']*100)}%)"
                         }
 
-            # ── Dedup: check AFTER brand resolution, using resolved brand_name ──
             from sqlalchemy import select, and_, func
             from ..database.models import Earning
             stmt = select(Earning).where(
@@ -186,7 +131,6 @@ class ToolExecutor:
                     "error": "Duplicate",
                     "message": f"This entry already exists: {format_currency(data.amount)} from {brand_name} on {format_date(entry_date)}."
                 }
-            # ───────────────────────────────────────────────────────────────────
 
             earning = await crud.EarningCRUD.create(
                 db=self.db,
@@ -196,15 +140,12 @@ class ToolExecutor:
                 deliverables=data.deliverables,
                 entry_date=entry_date,
                 notes=data.notes,
-                canonical_brand_id=canonical_brand_id  # FIX: link to brand alias
+                canonical_brand_id=canonical_brand_id
             )
 
             return {
                 "success": True,
                 "id": earning.id,
-                "brand": brand_name,
-                "amount": data.amount,
-                "date": format_date(entry_date),
                 "message": f"Added earning: {format_currency(data.amount)} from {brand_name} on {format_date(entry_date)}"
             }
         except ValidationError as ve:
@@ -243,10 +184,8 @@ class ToolExecutor:
             for key, value in fields.items():
                 if key not in ALLOWED_FIELDS:
                     dropped_fields.append(key)
-                    logger.warning(f"LLM attempted to set disallowed field: {key}")
                     continue
 
-                # Map to internal field name
                 internal_key = FIELD_MAP[key]
 
                 if internal_key == "payment_type":
@@ -259,9 +198,7 @@ class ToolExecutor:
                         update_data["entry_date"] = entry_date
                     else:
                         dropped_fields.append(f"date({value})")
-                        logger.warning(f"Could not parse date for update: {value}")
                 elif internal_key == "amount_earned":
-                    # Server-side amount parsing for updates too
                     if isinstance(value, str):
                         parsed = _sanitize_amount(value)
                         if parsed is not None:
@@ -270,16 +207,8 @@ class ToolExecutor:
                             dropped_fields.append(f"amount({value})")
                     else:
                         update_data["amount_earned"] = float(value)
-                elif internal_key == "deliverables":
-                    if isinstance(value, dict):
-                        update_data["deliverables"] = _sanitize_deliverables(value)
-                    else:
-                        dropped_fields.append("deliverables")
                 else:
                     update_data[internal_key] = value
-
-            if dropped_fields:
-                logger.warning(f"Dropped fields from update: {dropped_fields}")
 
             if not update_data:
                 return {
@@ -318,16 +247,9 @@ class ToolExecutor:
                     return {"success": True, "deleted_count": 1, "message": f"Deleted 1 earning"}
                 return {"success": False, "error": "Delete failed", "message": "Failed to delete earning"}
 
-            # Structured filter: only accept known keys
             brand_name = filter.get("brand_name")
-            start_date = parse_date_string(filter["start_date"]) if filter.get("start_date") else None
-            end_date = parse_date_string(filter["end_date"]) if filter.get("end_date") else None
-
-            # Reject unknown filter keys
-            allowed_filter_keys = {"brand_name", "start_date", "end_date", "id"}
-            unknown_keys = set(filter.keys()) - allowed_filter_keys
-            if unknown_keys:
-                logger.warning(f"Delete filter had unknown keys: {unknown_keys}")
+            start_date = parse_date_string(filter.get("start_date")) if filter.get("start_date") else None
+            end_date = parse_date_string(filter.get("end_date")) if filter.get("end_date") else None
 
             earnings = await crud.EarningCRUD.search(
                 db=self.db,
@@ -360,15 +282,13 @@ class ToolExecutor:
             logger.error(f"Internal error in delete_earning: {e}", exc_info=True)
             return {"success": False, "error": "Processing Error", "message": "Something went wrong while deleting earnings. Please try again."}
 
-    async def search_earnings(self, filters: Optional[Dict[str, Any]] = None, limit: Optional[int] = None) -> Dict[str, Any]:
+    async def search_earnings(self, filters: Optional[Dict[str, Any]] = None, sort_by: str = "date", limit: Optional[int] = None) -> Dict[str, Any]:
         """Search earnings with filters."""
         try:
             filters = filters or {}
             start_date, end_date = None, None
 
-            # Validate period — return error for unrecognized periods
             if "period" in filters:
-                # Check if period is recognized before calling get_date_range
                 recognized_periods = {
                     "today", "yesterday", "this week", "last week",
                     "this month", "last month", "this year", "last year", "all time"
@@ -390,7 +310,6 @@ class ToolExecutor:
             payment_type = PaymentType(filters["payment_type"].lower()) if "payment_type" in filters else None
             status = PaymentStatus(filters["status"].lower()) if "status" in filters else None
 
-            # Cap limit to prevent token overflow
             safe_limit = min(limit, 100) if limit else 100
 
             earnings = await crud.EarningCRUD.search(
@@ -433,15 +352,13 @@ class ToolExecutor:
             expense_date = parse_date_string(data.date) if data.date else get_ist_today()
             category_enum = ExpenseCategory(data.category)
 
-            # ── Dedup: include description for more precise matching ──
             from sqlalchemy import select, and_, func
             from ..database.models import Expense
             stmt = select(Expense).where(
                 and_(
                     Expense.category == category_enum,
                     Expense.amount == data.amount,
-                    Expense.expense_date == expense_date,
-                    Expense.description == (data.description or "")
+                    Expense.expense_date == expense_date
                 )
             ).limit(1)
             existing = await self.db.execute(stmt)
@@ -451,7 +368,6 @@ class ToolExecutor:
                     "error": "Duplicate",
                     "message": f"This expense already exists: {format_currency(data.amount)} for {data.category} on {format_date(expense_date)}."
                 }
-            # ──────────────────────────────────────────────
 
             expense = await crud.ExpenseCRUD.create(
                 db=self.db,
@@ -479,7 +395,6 @@ class ToolExecutor:
     async def get_financial_summary(self, period: str = "this month", include_expenses: bool = True) -> Dict[str, Any]:
         """Get financial summary for period."""
         try:
-            # Validate period
             recognized_periods = {
                 "today", "yesterday", "this week", "last week",
                 "this month", "last month", "this year", "last year", "all time"
@@ -522,7 +437,7 @@ class ToolExecutor:
             return {"success": False, "error": "Processing Error", "message": "Something went wrong while generating the financial summary. Please try again."}
 
     async def generate_report(self, format: str, period: str, include_charts: bool = True) -> Dict[str, Any]:
-        """Generate PDF or Excel report (wrapper for analytics)."""
+        """Generate PDF or Excel report."""
         try:
             from ..analytics import generate_report
             path = await generate_report(format=format, period=period, include_charts=include_charts, db_session=self.db)
@@ -548,7 +463,6 @@ class ToolExecutor:
             if not earning:
                 return {"success": False, "message": "Earning not found"}
 
-            # ── Check for existing PENDING reminder ──
             from sqlalchemy import select, and_
             from ..database.models import PaymentReminder, ReminderStatus
             stmt = select(PaymentReminder).where(
@@ -559,27 +473,20 @@ class ToolExecutor:
             ).limit(1)
             existing = await self.db.execute(stmt)
             existing_reminder = existing.scalar_one_or_none()
-            # ───────────────────────────────────────────
 
             from datetime import timedelta
 
-            # Support natural language dates: "tomorrow", "next week", "15th may"
             if reminder_date:
                 parsed = parse_date_string(reminder_date)
                 if parsed:
                     target_date = parsed
                 else:
-                    # Log warning when date parsing fails
-                    logger.warning(
-                        f"Reminder date parsing failed for '{reminder_date}', "
-                        f"falling back to earning_date + {days or 7} days"
-                    )
+                    logger.warning(f"Reminder date parsing failed for '{reminder_date}', falling back to earning_date + {days or 7} days")
                     target_date = earning.entry_date + timedelta(days=days or 7)
             else:
                 target_date = earning.entry_date + timedelta(days=days or 7)
 
             if existing_reminder:
-                # Update existing reminder instead of creating a duplicate
                 existing_reminder.reminder_date = target_date
                 existing_reminder.message = f"Reminder for {earning.brand_name}"
                 await self.db.flush()
@@ -630,9 +537,8 @@ def get_tool_definitions() -> List[Dict[str, Any]]:
                                 "posts": {"type": "integer", "description": "Number of posts"}
                             }
                         },
-                        "date": {"type": "string", "description": "Date of earning. Use 'today', 'yesterday', 'tomorrow', 'YYYY-MM-DD', or '15th April 2026'. Default 'today' if not mentioned."},
-                        "notes": {"type": "string", "description": "Additional notes"},
-                        "currency": {"type": "string", "description": "Currency code. All amounts are in INR. Default 'INR'."}
+                        "date": {"type": "string", "description": "Date of earning. Use 'today', 'yesterday', 'tomorrow', 'YYYY-MM-DD', or '15th April 2026'. Default 'today'."},
+                        "notes": {"type": "string", "description": "Additional notes"}
                     },
                     "required": ["amount"]
                 }
@@ -642,7 +548,7 @@ def get_tool_definitions() -> List[Dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": "update_earning",
-                "description": "Update an existing earning entry. Use 'amount' for amount_earned, 'date' for entry_date, 'brand_name' for brand.",
+                "description": "Update an existing earning entry.",
                 "parameters": {
                     "type": "object",
                     "additionalProperties": False,
@@ -651,20 +557,12 @@ def get_tool_definitions() -> List[Dict[str, Any]]:
                         "fields": {
                             "type": "object",
                             "additionalProperties": False,
-                            "description": "Fields to update. Use EXACT keys: amount (number), brand_name (string), payment_type ('cash'/'barter'), deliverables (object with reels/stories/posts), date (string), notes (string), status ('pending'/'received').",
+                            "description": "Fields to update. Use EXACT keys: amount (number), brand_name (string), payment_type ('cash'/'barter'), deliverables (object), date (string), notes (string), status ('pending'/'received').",
                             "properties": {
-                                "amount": {"type": "number", "description": "New amount earned"},
+                                "amount": {"type": "number", "description": "New amount"},
                                 "brand_name": {"type": "string", "description": "New brand name"},
                                 "payment_type": {"type": "string", "enum": ["cash", "barter"]},
-                                "deliverables": {
-                                    "type": "object",
-                                    "additionalProperties": False,
-                                    "properties": {
-                                        "reels": {"type": "integer"},
-                                        "stories": {"type": "integer"},
-                                        "posts": {"type": "integer"}
-                                    }
-                                },
+                                "deliverables": {"type": "object", "description": "Deliverables: reels, stories, posts"},
                                 "date": {"type": "string", "description": "New date"},
                                 "notes": {"type": "string"},
                                 "status": {"type": "string", "enum": ["pending", "received", "overdue"]}
@@ -687,12 +585,12 @@ def get_tool_definitions() -> List[Dict[str, Any]]:
                         "filter": {
                             "type": "object",
                             "additionalProperties": False,
-                            "description": "Filter criteria. Use EXACT keys: id (integer), brand_name (string), start_date (string), end_date (string).",
+                            "description": "Filter criteria. Use keys: id, brand_name, start_date, end_date.",
                             "properties": {
-                                "id": {"type": "integer", "description": "Delete specific earning by ID"},
-                                "brand_name": {"type": "string", "description": "Delete earnings for this brand"},
-                                "start_date": {"type": "string", "description": "Delete earnings from this date onwards"},
-                                "end_date": {"type": "string", "description": "Delete earnings up to this date"}
+                                "id": {"type": "integer", "description": "Delete by ID"},
+                                "brand_name": {"type": "string", "description": "Delete by brand"},
+                                "start_date": {"type": "string", "description": "Start date filter"},
+                                "end_date": {"type": "string", "description": "End date filter"}
                             }
                         }
                     },
@@ -712,17 +610,18 @@ def get_tool_definitions() -> List[Dict[str, Any]]:
                         "filters": {
                             "type": "object",
                             "additionalProperties": False,
-                            "description": "Search filters. Use EXACT keys: period, brand_name, start_date, end_date, payment_type, status.",
+                            "description": "Search filters. Use keys: period, brand_name, start_date, end_date, payment_type, status.",
                             "properties": {
-                                "period": {"type": "string", "description": "Time period: today, yesterday, this week, last week, this month, last month, this year, last year, all time"},
-                                "brand_name": {"type": "string", "description": "Filter by brand name"},
-                                "start_date": {"type": "string", "description": "Start date (YYYY-MM-DD or natural language)"},
+                                "period": {"type": "string", "description": "Period: today, this week, this month, last month, this year, all time"},
+                                "brand_name": {"type": "string", "description": "Filter by brand"},
+                                "start_date": {"type": "string", "description": "Start date"},
                                 "end_date": {"type": "string", "description": "End date"},
                                 "payment_type": {"type": "string", "enum": ["cash", "barter"]},
                                 "status": {"type": "string", "enum": ["pending", "received", "overdue"]}
                             }
                         },
-                        "limit": {"type": "integer", "description": "Max results (default 100, max 100)"}
+                        "sort_by": {"type": "string", "description": "Sort field (default: date)"},
+                        "limit": {"type": "integer", "description": "Max results (default 100)"}
                     }
                 }
             }
@@ -738,8 +637,8 @@ def get_tool_definitions() -> List[Dict[str, Any]]:
                     "properties": {
                         "category": {"type": "string", "enum": ["video_editing", "travel", "equipment", "other"], "description": "Expense category"},
                         "amount": {"type": "number", "description": "Expense amount in rupees. PARSE natural language (e.g., '2k' -> 2000.0) before calling."},
-                        "description": {"type": "string", "description": "Expense description"},
-                        "date": {"type": "string", "description": "Date of expense. Use 'today', 'yesterday', 'YYYY-MM-DD', or natural language. Default 'today'."}
+                        "description": {"type": "string", "description": "Description"},
+                        "date": {"type": "string", "description": "Date of expense. Default 'today'."}
                     },
                     "required": ["category", "amount"]
                 }
@@ -754,8 +653,8 @@ def get_tool_definitions() -> List[Dict[str, Any]]:
                     "type": "object",
                     "additionalProperties": False,
                     "properties": {
-                        "period": {"type": "string", "description": "Time period. MUST be one of: today, yesterday, this week, last week, this month, last month, this year, last year, all time"},
-                        "include_expenses": {"type": "boolean", "description": "Include expenses in summary"}
+                        "period": {"type": "string", "description": "Period: today, this week, this month, last month, this year, last year, all time"},
+                        "include_expenses": {"type": "boolean", "description": "Include expenses"}
                     }
                 }
             }
@@ -764,14 +663,14 @@ def get_tool_definitions() -> List[Dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": "generate_report",
-                "description": "Generate PDF or Excel report. The report file will be sent to you after generation.",
+                "description": "Generate PDF or Excel report. Report file will be sent to user.",
                 "parameters": {
                     "type": "object",
                     "additionalProperties": False,
                     "properties": {
                         "format": {"type": "string", "enum": ["pdf", "excel"], "description": "Report format"},
-                        "period": {"type": "string", "description": "Time period: this month, last month, this year, etc."},
-                        "include_charts": {"type": "boolean", "description": "Include charts in report"}
+                        "period": {"type": "string", "description": "Time period"},
+                        "include_charts": {"type": "boolean", "description": "Include charts"}
                     },
                     "required": ["format", "period"]
                 }
@@ -787,7 +686,7 @@ def get_tool_definitions() -> List[Dict[str, Any]]:
                     "additionalProperties": False,
                     "properties": {
                         "name": {"type": "string", "description": "Brand name to match"},
-                        "threshold": {"type": "number", "description": "Confidence threshold (0-1). Default 0.75"}
+                        "threshold": {"type": "number", "description": "Confidence threshold (0-1)"}
                     },
                     "required": ["name"]
                 }
@@ -797,14 +696,14 @@ def get_tool_definitions() -> List[Dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": "set_reminder",
-                "description": "Set payment reminder for an earning. Use reminder_date for natural language dates like 'tomorrow', 'next week', '15th may'. Use days for number of days after earning date.",
+                "description": "Set payment reminder for an earning.",
                 "parameters": {
                     "type": "object",
                     "additionalProperties": False,
                     "properties": {
-                        "earning_id": {"type": "integer", "description": "Earning ID to remind about"},
-                        "days": {"type": "integer", "description": "Days after the earning's date. Use if reminder_date is not suitable."},
-                        "reminder_date": {"type": "string", "description": "When to remind. Use natural language: 'tomorrow', 'next week', '15th may', 'end of month'. Preferred over days."}
+                        "earning_id": {"type": "integer", "description": "Earning ID"},
+                        "days": {"type": "integer", "description": "Days after earning date"},
+                        "reminder_date": {"type": "string", "description": "Natural language date: 'tomorrow', 'next week', '15th may'"}
                     },
                     "required": ["earning_id"]
                 }

@@ -1,6 +1,6 @@
-"""Brand matching module with fuzzy matching (rapidfuzz - MIT licensed)."""
-from typing import List, Dict, Any, Optional
-from rapidfuzz import fuzz, process
+"""Brand matching module with fuzzy matching."""
+from typing import List, Dict, Any, Optional, Tuple
+from fuzzywuzzy import fuzz, process
 from sqlalchemy.orm import Session
 
 from src.database import crud
@@ -19,7 +19,7 @@ async def match_brand(
 
     normalized_name = normalize_brand_name(brand_name)
 
-    # Query only unique brand names from the database
+    # Query only unique brand names from the database (more efficient)
     from sqlalchemy import select, func
     from src.database.models import Earning
 
@@ -30,30 +30,30 @@ async def match_brand(
     if not brand_names:
         return []
 
-    # Build normalized lookup once (O(n) instead of O(n*m))
-    normalized_map = {normalize_brand_name(b): b for b in brand_names}
-    normalized_names = list(normalized_map.keys())
-
     matches = process.extract(
         normalized_name,
-        normalized_names,
+        [normalize_brand_name(b) for b in brand_names],
         limit=5,
-        scorer=fuzz.token_sort_ratio,
-        score_cutoff=threshold * 100
+        scorer=fuzz.token_sort_ratio
     )
 
     results = []
-    for matched_name, score, _ in matches:
+    for matched_name, score in matches:
         confidence = score / 100.0
-        original_name = normalized_map[matched_name]
 
-        results.append({
-            "brand_name": original_name,
-            "confidence": confidence,
-            "normalized_name": matched_name
-        })
+        if confidence >= threshold:
+            original_name = brand_names[
+                [normalize_brand_name(b) for b in brand_names].index(matched_name)
+            ]
+
+            results.append({
+                "brand_name": original_name,
+                "confidence": confidence,
+                "normalized_name": matched_name
+            })
 
     results.sort(key=lambda x: x["confidence"], reverse=True)
+
     return results
 
 

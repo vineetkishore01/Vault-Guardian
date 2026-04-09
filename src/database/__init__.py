@@ -4,7 +4,7 @@ from pathlib import Path
 from sqlalchemy import create_engine
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import sessionmaker, Session
-from sqlalchemy.pool import StaticPool, NullPool
+from sqlalchemy.pool import StaticPool
 from contextlib import asynccontextmanager, contextmanager
 from typing import Generator, AsyncGenerator
 
@@ -25,11 +25,11 @@ class DatabaseManager:
         # Ensure data directory exists
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         
-        # Async setup — NullPool for production SQLite (one connection per request)
+        # Async setup
         self.async_engine = create_async_engine(
             f"sqlite+aiosqlite:///{self.db_path}",
             connect_args={"check_same_thread": False},
-            poolclass=NullPool,
+            poolclass=StaticPool,
             echo=False
         )
 
@@ -40,11 +40,11 @@ class DatabaseManager:
             class_=AsyncSession
         )
 
-        # Sync setup — NullPool for production SQLite
+        # Sync setup (for migrations/initialization)
         self.sync_engine = create_engine(
             f"sqlite:///{self.db_path}",
             connect_args={"check_same_thread": False},
-            poolclass=NullPool,
+            poolclass=StaticPool,
             echo=False
         )
         
