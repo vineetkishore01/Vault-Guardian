@@ -28,16 +28,8 @@ COPY config/ ./config/
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
-# Create non-root user
-RUN groupadd -g 1000 appgroup && \
-    useradd -u 1000 -g appgroup -M -s /bin/false appuser && \
-    chown -R appuser:appgroup /app
-
 # Create runtime directories (will be overridden by volumes, fixed by entrypoint)
 RUN mkdir -p /app/data /app/logs /app/reports
-
-# Switch to non-root user
-USER appuser
 
 # Environment variables with defaults
 ENV PYTHONUNBUFFERED=1 \
