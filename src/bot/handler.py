@@ -367,6 +367,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         logger.error(f"LLM called unknown tool: {tool_name}")
                         break
 
+                    # Log tool call with arguments (redact sensitive fields)
+                    safe_args = {k: str(v)[:50] for k, v in arguments.items()}
+                    logger.info(f"🔧 LLM calling: {tool_name}({json.dumps(safe_args)})")
+
                     try:
                         result = await method(**arguments)
                         batch_results.append(result)
@@ -377,6 +381,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             logger.info(f"✅ Tool '{tool_name}': {result.get('message', 'OK')[:100]}")
                         else:
                             logger.warning(f"⚠️ Tool '{tool_name}' failed: {result.get('message', 'Unknown error')[:100]}")
+
+                        # Send Telegram notification for data mutations
+                        mutation_tools = {"add_earning", "add_expense", "update_earning", "delete_earning"}
+                        if tool_name in mutation_tools:
+                            status_emoji = "✅" if result.get("success") else "❌"
+                            notify_msg = f"{status_emoji} **{tool_name.replace('_', ' ').title()}**\n"
+                            notify_msg += f"Result: {result.get('message', 'No details')}"
+                            try:
+                                await update.message.reply_text(notify_msg, parse_mode="Markdown")
+                            except Exception:
+                                pass  # Don't fail the turn if notification fails
 
                         if result.get("requires_confirmation"):
                             confirmation_result = result

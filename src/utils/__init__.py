@@ -233,13 +233,6 @@ def normalize_brand_name(name: str) -> str:
     return name.strip()
 
 
-def truncate_string(text: str, max_length: int = 100) -> str:
-    """Truncate string to max length with ellipsis."""
-    if len(text) <= max_length:
-        return text
-    return text[:max_length - 3] + "..."
-
-
 def validate_chat_id(chat_id: str) -> bool:
     """Validate chat ID against allowed chat ID."""
     return str(chat_id) == str(config.telegram.allowed_chat_id)

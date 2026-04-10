@@ -1,5 +1,5 @@
 """Brand matching module with fuzzy matching."""
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional
 from fuzzywuzzy import fuzz, process
 from sqlalchemy.orm import Session
 
@@ -19,8 +19,7 @@ async def match_brand(
 
     normalized_name = normalize_brand_name(brand_name)
 
-    # Query only unique brand names from the database (more efficient)
-    from sqlalchemy import select, func
+    from sqlalchemy import select
     from src.database.models import Earning
 
     stmt = select(Earning.brand_name).distinct()
@@ -40,12 +39,10 @@ async def match_brand(
     results = []
     for matched_name, score in matches:
         confidence = score / 100.0
-
         if confidence >= threshold:
             original_name = brand_names[
                 [normalize_brand_name(b) for b in brand_names].index(matched_name)
             ]
-
             results.append({
                 "brand_name": original_name,
                 "confidence": confidence,
@@ -53,7 +50,6 @@ async def match_brand(
             })
 
     results.sort(key=lambda x: x["confidence"], reverse=True)
-
     return results
 
 
@@ -69,7 +65,6 @@ async def get_or_create_brand_alias(
         return None
 
     existing = await crud.BrandAliasCRUD.get_by_alias(db_session, alias)
-
     if existing:
         if confidence_score > existing.confidence_score:
             existing.confidence_score = confidence_score
@@ -96,7 +91,6 @@ async def confirm_brand_mapping(
         return False
 
     brand_alias = await crud.BrandAliasCRUD.get_by_alias(db_session, alias)
-
     if brand_alias:
         brand_alias.canonical_name = canonical_name
         brand_alias.confidence_score = 1.0
@@ -112,70 +106,3 @@ async def confirm_brand_mapping(
         is_confirmed=True
     )
     return True
-
-
-async def get_all_brand_aliases(
-    canonical_name: str,
-    db_session: Session = None
-) -> List[BrandAlias]:
-    """Get all aliases for a canonical brand name."""
-    if not db_session:
-        return []
-    return await crud.BrandAliasCRUD.get_all_aliases(db_session, canonical_name)
-
-
-async def find_canonical_brand(
-    brand_name: str,
-    db_session: Session = None
-) -> Optional[str]:
-    """Find canonical brand name for a given brand name."""
-    if not db_session:
-        return None
-
-    normalized = normalize_brand_name(brand_name)
-    brand_alias = await crud.BrandAliasCRUD.get_by_alias(db_session, normalized)
-
-    if brand_alias:
-        return brand_alias.canonical_name
-
-    matches = await match_brand(brand_name, threshold=0.9, db_session=db_session)
-    if matches and matches[0]["confidence"] >= 0.9:
-        return matches[0]["brand_name"]
-
-    return None
-
-
-async def suggest_brand_name(
-    partial_name: str,
-    db_session: Session = None
-) -> List[str]:
-    """Suggest brand names based on partial match."""
-    if not db_session:
-        return []
-
-    existing_brands = await crud.EarningCRUD.search(
-        db=db_session,
-        brand_name=partial_name,
-        limit=10
-    )
-
-    brand_names = list(set([e.brand_name for e in existing_brands]))
-    if not brand_names:
-        return []
-
-    normalized_map = {normalize_brand_name(b): b for b in brand_names}
-    normalized_names = list(normalized_map.keys())
-
-    suggestions = process.extract(
-        normalize_brand_name(partial_name),
-        normalized_names,
-        limit=5,
-        scorer=fuzz.partial_ratio,
-        score_cutoff=60
-    )
-
-    results = []
-    for matched_name, score, _ in suggestions:
-        results.append(normalized_map[matched_name])
-
-    return results
