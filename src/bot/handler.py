@@ -588,6 +588,11 @@ async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         executor = ToolExecutor(db)
         res = await executor.get_financial_summary(period="this month")
         if res["success"]:
+            logger.info(
+                f"📊 /summary result: earnings={res['total_earnings']}, "
+                f"expenses={res['total_expenses']}, net={res['net_income']}, "
+                f"period={res.get('start_date')} to {res.get('end_date')}"
+            )
             await update.message.reply_text(res["message"])
         else:
             await update.message.reply_text(f"❌ Error: {res.get('message')}")

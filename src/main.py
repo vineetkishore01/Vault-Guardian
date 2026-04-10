@@ -9,6 +9,7 @@ from src.config import config
 from src.database import db_manager
 from src.bot import run_bot
 from src.scheduler import reminder_scheduler
+from src.llm import llm_client
 
 # ── Duplicate instance guard ──
 PID_FILE = Path(".vault_guardian.pid")
@@ -114,6 +115,19 @@ async def send_startup_notification():
         logger.error(f"Failed to send startup notification: {e}")
 
 
+async def warmup_llm():
+    """Send a lightweight request to warm up the LLM model (prevents cold start delays)."""
+    try:
+        logger.info("Warming up LLM connection...")
+        await llm_client.get_completion(
+            prompt="Say 'ready' in one word.",
+            system_prompt="You are a helpful assistant."
+        )
+        logger.info("LLM warm-up complete")
+    except Exception as e:
+        logger.warning(f"LLM warm-up failed (will retry on first user message): {e}")
+
+
 async def main():
     """Main entry point."""
     _check_duplicate()
@@ -137,6 +151,9 @@ async def main():
 
     logger.info("Sending startup notification...")
     await send_startup_notification()
+
+    logger.info("Warming up LLM...")
+    await warmup_llm()
 
     logger.info("Starting bot...")
     try:

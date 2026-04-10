@@ -12,7 +12,7 @@ llm:
   top_p: 1.0
   seed: 42
   stream: false
-  timeout: null
+  timeout: 120
   max_retries: 3
   retry_delay: 2
   enable_thinking: true
